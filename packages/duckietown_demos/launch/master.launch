@@ -20,8 +20,6 @@
 	<arg name="intersectionType" default= "stopSign"/>
 	<!-- end args -->
 
-    <!-- general convention on remappings is that we remap the "subscribers" -->
-
     <!-- start switch args -->
     <arg name="/camera/raw" default="false"/>
     <arg name="/camera/rect" default="false"/>
