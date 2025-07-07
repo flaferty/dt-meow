@@ -56,6 +56,7 @@ class LaneControllerNode(DTROS):
         self.current_tag = None
         self.in_intersection = False
         self.last_stop_time = 0
+        self.stop_duration = 1.5  # seconds to pause before turning
 
         # Internal state
         self.pose_msg_dict = {}
@@ -117,10 +118,28 @@ class LaneControllerNode(DTROS):
         current_s = rospy.Time.now().to_sec()
         dt = current_s - self.last_s if self.last_s is not None else None
 
-        if self.at_stop_line or self.at_obstacle_stop_line:
-            v = 0
-            omega = 0
+        if self.fsm_state == "INTERSECTION_CONTROL":
+            if not self.in_intersection:
+                self.in_intersection = True
+                self.last_stop_time = current_s
+                v = 0.0
+                omega = 0.0
+            elif current_s - self.last_stop_time < self.stop_duration:
+                v = 0.0
+                omega = 0.0
+            else:
+                d_err = pose_msg.d - self.params["~d_offset"]
+                phi_err = pose_msg.phi
+                wheels_cmd_exec = [self.wheels_cmd_executed.vel_left, self.wheels_cmd_executed.vel_right]
+                stop_dist = self.obstacle_stop_line_distance if self.obstacle_stop_line_detected else self.stop_line_distance
+                v, omega = self.controller.compute_control_action(d_err, phi_err, dt, wheels_cmd_exec, stop_dist)
+                behavior = self.tag_behavior_map.get(self.current_tag)
+                if behavior == "left":
+                    omega += 4.0
+                elif behavior == "right":
+                    omega -= 4.0
         else:
+            self.in_intersection = False
             d_err = pose_msg.d - self.params["~d_offset"]
             phi_err = pose_msg.phi
 
@@ -134,17 +153,9 @@ class LaneControllerNode(DTROS):
 
             wheels_cmd_exec = [self.wheels_cmd_executed.vel_left, self.wheels_cmd_executed.vel_right]
             stop_dist = self.obstacle_stop_line_distance if self.obstacle_stop_line_detected else self.stop_line_distance
-
             v, omega = self.controller.compute_control_action(d_err, phi_err, dt, wheels_cmd_exec, stop_dist)
 
-            if self.fsm_state == "INTERSECTION_CONTROL" and self.current_tag is not None:
-                behavior = self.tag_behavior_map.get(self.current_tag)
-                if behavior == "left":
-                    omega += 4.0
-                elif behavior == "right":
-                    omega -= 4.0
-
-            omega += self.params["~omega_ff"]
+        omega += self.params["~omega_ff"]
 
         car_cmd_msg = Twist2DStamped()
         car_cmd_msg.header = pose_msg.header
