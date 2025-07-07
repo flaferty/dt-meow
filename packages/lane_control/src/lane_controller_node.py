@@ -27,12 +27,15 @@ class LaneControllerNode(DTROS):
         # Regular ROS params
         self.params["~d_thres"] = rospy.get_param("~d_thres", 0.25)
         self.params["~d_offset"] = rospy.get_param("~d_offset", 0.0)
-        self.params["~integral_bounds"] = rospy.get_param("~integral_bounds", {'d': {'bot': -0.3, 'top': 0.3}, 'phi': {'bot': -1.2, 'top': 1.2}})
+        self.params["~integral_bounds"] = rospy.get_param(
+            "~integral_bounds",
+            {'d': {'bot': -0.3, 'top': 0.3}, 'phi': {'bot': -1.2, 'top': 1.2}}
+        )
         self.params["~omega_ff"] = rospy.get_param("~omega_ff", 0.0)
         self.params["~verbose"] = rospy.get_param("~verbose", False)
         self.params["~dt"] = rospy.get_param("~dt", 0.05)
 
-        # PID controller setup
+        # PID Controller setup
         d_bounds = self.params["~integral_bounds"]["d"]
         phi_bounds = self.params["~integral_bounds"]["phi"]
 
@@ -47,7 +50,7 @@ class LaneControllerNode(DTROS):
             output_limits=(-8.0, 8.0)
         )
 
-        # Intersection control
+        # Intersection Control
         self.tag_behavior_map = {
             1: "left",
             2: "right",
@@ -56,9 +59,9 @@ class LaneControllerNode(DTROS):
         self.current_tag = None
         self.in_intersection = False
         self.last_stop_time = 0
-        self.stop_duration = 1.5  # seconds to pause before turning
+        self.stop_duration = 1.5
 
-        # Internal state
+        # State
         self.pose_msg_dict = {}
         self.last_s = None
         self.at_stop_line = False
@@ -115,55 +118,49 @@ class LaneControllerNode(DTROS):
         self.pub_car_cmd.publish(car_cmd_msg)
 
     def getControlAction(self, pose_msg):
-        current_s = rospy.Time.now().to_sec()
-        dt = current_s - self.last_s if self.last_s is not None else None
+        try:
+            current_s = rospy.Time.now().to_sec()
+            dt = current_s - self.last_s if self.last_s else self.params["~dt"]
 
-        if self.fsm_state == "INTERSECTION_CONTROL":
-            if not self.in_intersection:
-                self.in_intersection = True
-                self.last_stop_time = current_s
-                v = 0.0
-                omega = 0.0
-            elif current_s - self.last_stop_time < self.stop_duration:
-                v = 0.0
-                omega = 0.0
-            else:
-                d_err = pose_msg.d - self.params["~d_offset"]
-                phi_err = pose_msg.phi
-                wheels_cmd_exec = [self.wheels_cmd_executed.vel_left, self.wheels_cmd_executed.vel_right]
-                stop_dist = self.obstacle_stop_line_distance if self.obstacle_stop_line_detected else self.stop_line_distance
-                v, omega = self.controller.compute_control_action(d_err, phi_err, dt, wheels_cmd_exec, stop_dist)
-                behavior = self.tag_behavior_map.get(self.current_tag)
-                if behavior == "left":
-                    omega += 4.0
-                elif behavior == "right":
-                    omega -= 4.0
-        else:
-            self.in_intersection = False
             d_err = pose_msg.d - self.params["~d_offset"]
             phi_err = pose_msg.phi
 
-            if np.abs(d_err) > self.params["~d_thres"]:
-                self.log("d_err too large, thresholding it!", "error")
-                d_err = np.sign(d_err) * self.params["~d_thres"]
+            # Threshold errors
+            d_err = np.clip(d_err, -self.params["~d_thres"], self.params["~d_thres"])
+            phi_err = np.clip(phi_err, self.params["~theta_thres_min"].value, self.params["~theta_thres_max"].value)
 
-            if phi_err > self.params["~theta_thres_max"].value or phi_err < self.params["~theta_thres_min"].value:
-                self.log("phi_err out of bounds, thresholding!", "error")
-                phi_err = np.clip(phi_err, self.params["~theta_thres_min"].value, self.params["~theta_thres_max"].value)
+            if self.fsm_state == "INTERSECTION_CONTROL":
+                if not self.in_intersection:
+                    self.in_intersection = True
+                    self.last_stop_time = current_s
+                    v, omega = 0.0, 0.0
+                elif current_s - self.last_stop_time < self.stop_duration:
+                    v, omega = 0.0, 0.0
+                else:
+                    omega = self.controller.update(d_err, phi_err)
+                    v = self.params["~v_bar"].value
+                    behavior = self.tag_behavior_map.get(self.current_tag)
+                    if behavior == "left":
+                        omega += 4.0
+                    elif behavior == "right":
+                        omega -= 4.0
+            else:
+                self.in_intersection = False
+                omega = self.controller.update(d_err, phi_err)
+                v = self.params["~v_bar"].value
 
-            wheels_cmd_exec = [self.wheels_cmd_executed.vel_left, self.wheels_cmd_executed.vel_right]
-            stop_dist = self.obstacle_stop_line_distance if self.obstacle_stop_line_detected else self.stop_line_distance
-            v, omega = self.controller.compute_control_action(d_err, phi_err, dt, wheels_cmd_exec, stop_dist)
+            omega += self.params["~omega_ff"]
 
-        omega += self.params["~omega_ff"]
+            car_cmd_msg = Twist2DStamped()
+            car_cmd_msg.header = pose_msg.header
+            car_cmd_msg.v = v
+            car_cmd_msg.omega = omega
 
-        car_cmd_msg = Twist2DStamped()
-        car_cmd_msg.header = pose_msg.header
-        car_cmd_msg.v = v
-        car_cmd_msg.omega = omega
+            self.publishCmd(car_cmd_msg)
+            self.last_s = current_s
 
-        self.publishCmd(car_cmd_msg)
-        self.last_s = current_s
+        except Exception as e:
+            rospy.logerr(f"[lane_controller_node] Exception in getControlAction: {e}")
 
     def cbParametersChanged(self):
         self.controller.update_parameters(self.params)

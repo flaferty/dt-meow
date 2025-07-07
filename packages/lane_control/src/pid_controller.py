@@ -1,44 +1,48 @@
 class PIDController:
-    def __init__(self, kp, ki, kd, dt, output_limits=(None, None), integrator_limits=(None, None)):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
+    def __init__(self, kp_d, ki_d, kp_phi, ki_phi, dt,
+                 d_limits=(None, None), phi_limits=(None, None), output_limits=(None, None)):
+
         self.dt = dt
+        self.kp_d = kp_d
+        self.ki_d = ki_d
+        self.kp_phi = kp_phi
+        self.ki_phi = ki_phi
 
+        self.d_integral = 0.0
+        self.phi_integral = 0.0
+
+        self.d_limits = d_limits
+        self.phi_limits = phi_limits
         self.output_limits = output_limits
-        self.integrator_limits = integrator_limits
 
-        self.integral = 0.0
-        self.prev_error = 0.0
+        self.last_d_err = 0.0
+        self.last_phi_err = 0.0
 
     def reset(self):
-        self.integral = 0.0
-        self.prev_error = 0.0
+        self.d_integral = 0.0
+        self.phi_integral = 0.0
 
-    def update(self, error):
-        # Proportional
-        P = self.kp * error
+    def update(self, d_err, phi_err):
+        # Integral
+        self.d_integral += d_err * self.dt
+        self.phi_integral += phi_err * self.dt
 
-        # Integral with clamping
-        self.integral += error * self.dt
-        min_i, max_i = self.integrator_limits
-        if min_i is not None:
-            self.integral = max(min_i, self.integral)
-        if max_i is not None:
-            self.integral = min(max_i, self.integral)
-        I = self.ki * self.integral
+        # Clamp integral
+        self.d_integral = np.clip(self.d_integral, *self.d_limits)
+        self.phi_integral = np.clip(self.phi_integral, *self.phi_limits)
 
-        # Derivative
-        derivative = (error - self.prev_error) / self.dt
-        D = self.kd * derivative
-        self.prev_error = error
+        # PID terms
+        omega_d = self.kp_d * d_err + self.ki_d * self.d_integral
+        omega_phi = self.kp_phi * phi_err + self.ki_phi * self.phi_integral
 
-        # Total output
-        output = P + I + D
-        min_o, max_o = self.output_limits
-        if min_o is not None:
-            output = max(min_o, output)
-        if max_o is not None:
-            output = min(max_o, output)
+        omega = omega_d + omega_phi
 
-        return output
+        # Clamp total output
+        omega = np.clip(omega, *self.output_limits)
+        return omega
+
+    def update_parameters(self, params):
+        self.kp_d = params["~k_d"].value
+        self.ki_d = params["~k_Id"].value
+        self.kp_phi = params["~k_theta"].value
+        self.ki_phi = params["~k_Iphi"].value
